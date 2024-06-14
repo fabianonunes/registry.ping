@@ -1,0 +1,5 @@
+services:
+  refresher:
+    image: localhost/refresher
+    build:
+      context: .

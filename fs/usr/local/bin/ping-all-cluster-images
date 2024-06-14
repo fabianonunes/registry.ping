@@ -1,0 +1,59 @@
+#!/bin/bash
+set -eo pipefail
+
+declare -A registries
+
+get_all_cluster_images() {
+  # retorna as imagens de todos os containers e initContainers do cluster
+  local query="{range .items[*].spec['initContainers', 'containers'][*]}{.image}{'\n'}{end}"
+  kubectl get pods --all-namespaces --output "jsonpath=${query}" | sort | uniq
+}
+
+parse_dockerconfig() {
+  # extrai um array associativo registry=>auth do arquivo de configuração
+  auths=$(jq -r '.auths | to_entries[] | "\(.key)_\(.value.auth)"' /etc/dockerconfig.json)
+
+  while IFS="_" read -r registry auth; do
+    registries["$registry"]=$(base64 --decode <<< "$auth")
+  done <<< "$auths"
+}
+
+get_manifest_url() {
+  # retorna a url de manifest de uma registry/image:tag, considerando os casos
+  # em que o identificador da imagem não contém a URL da registry e/ou a tag
+  local image=$1
+
+  # default
+  local registry="docker.io"
+  local tag="latest"
+  local repo=""
+
+  # confere se a imagem contém um registry (ghcr.io, registry.wayne.corp, etc...)
+  if [[ $image =~ ^(.+\.[^/]+)/(.+)$ ]]; then
+    registry="${BASH_REMATCH[1]}"
+    image="${BASH_REMATCH[2]}"
+  fi
+
+  # verifica se a imagem contém uma tag
+  if [[ $image =~ ^(.+):(.+)$ ]]; then
+    repo="${BASH_REMATCH[1]}"
+    tag="${BASH_REMATCH[2]}"
+  else
+    repo="$image"
+  fi
+
+  auth=${registries["$registry"]}
+  if [[ -n "$auth" ]]; then
+    url="https://${registry}/v2/${repo}/manifests/${tag}"
+    curl --location --fail --silent --user "${auth}" "$url" > /dev/null
+    echo "ping [$image]"
+  fi
+}
+
+parse_dockerconfig
+
+for image in $(get_all_cluster_images); do
+  if ! get_manifest_url "$image"; then
+    echo "error [$image]"
+  fi
+done
